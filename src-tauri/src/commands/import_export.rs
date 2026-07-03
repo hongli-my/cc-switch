@@ -5,9 +5,6 @@ use std::path::PathBuf;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::commands::sync_support::{
-    post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
-};
 use crate::database::backup::BackupEntry;
 use crate::database::Database;
 use crate::error::AppError;
@@ -44,15 +41,42 @@ pub async fn import_config_from_file(
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let db = state.db.clone();
-    let db_for_sync = db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let path_buf = PathBuf::from(&filePath);
         let backup_id = db.import_sql(&path_buf)?;
-        let warning = post_sync_warning_from_result(Ok(run_post_import_sync(db_for_sync)));
+        // Apply imported config to live providers + reload settings cache.
+        // (Cloud sync post-import triggers have been removed; this only
+        //  performs local live-config sync and settings reload.)
+        let warning = {
+            let app_state = AppState::new(db.clone());
+            let result = ProviderService::sync_current_to_live(&app_state)
+                .and_then(|_| crate::settings::reload_settings());
+            match result {
+                Ok(()) => None,
+                Err(err) => Some(
+                    AppError::localized(
+                        "sync.post_operation_sync_failed",
+                        format!("后置同步状态失败: {err}"),
+                        format!("Post-operation synchronization failed: {err}"),
+                    )
+                    .to_string(),
+                ),
+            }
+        };
         if let Some(msg) = warning.as_ref() {
             log::warn!("[Import] post-import sync warning: {msg}");
         }
-        Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
+        let mut payload = json!({
+            "success": true,
+            "message": "SQL imported successfully",
+            "backupId": backup_id
+        });
+        if let Some(message) = warning {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("warning".to_string(), Value::String(message));
+            }
+        }
+        Ok::<_, AppError>(payload)
     })
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?

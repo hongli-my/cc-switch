@@ -78,14 +78,10 @@ pub struct Database {
 }
 
 fn register_db_change_hook(conn: &Connection) {
+    // Cloud sync (webdav/s3 auto-sync) has been removed; hook kept as no-op
+    // so existing sqlite update_hook registration stays intact.
     conn.update_hook(Some(
-        |action: Action, _database: &str, table: &str, _row_id: i64| match action {
-            Action::SQLITE_INSERT | Action::SQLITE_UPDATE | Action::SQLITE_DELETE => {
-                crate::services::webdav_auto_sync::notify_db_changed(table);
-                crate::services::s3_auto_sync::notify_db_changed(table);
-            }
-            _ => {}
-        },
+        |_action: Action, _database: &str, _table: &str, _row_id: i64| {},
     ));
 }
 

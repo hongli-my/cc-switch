@@ -11,10 +11,12 @@ import { useEffect, useRef, useState, type RefObject } from "react";
  */
 export function useAutoCompact(
   containerRef: RefObject<HTMLDivElement | null>,
+  resetKey?: unknown,
 ): boolean {
   const [compact, setCompact] = useState(false);
   const normalWidthRef = useRef(0);
   const lockUntilRef = useRef(0);
+  const firstResetRef = useRef(true);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -47,6 +49,33 @@ export function useAutoCompact(
     ro.observe(el);
     return () => ro.disconnect();
   }, [compact]);
+
+  // When `resetKey` changes (e.g. switching the active app) the toolbar is
+  // mid-transition (button group swap via AnimatePresence) and the cached
+  // `normalWidthRef` is stale for the new content. Expanding on that stale
+  // value is what caused the compact <-> normal oscillation (visible jitter).
+  //
+  // Lock the ResizeObserver for the transition duration, then run a single
+  // safe re-evaluation that only *collapses* to compact when truly
+  // overflowing — it never expands on stale data. A legitimate expand still
+  // happens later via the ResizeObserver on a real window resize.
+  useEffect(() => {
+    if (resetKey === undefined || firstResetRef.current) {
+      firstResetRef.current = false;
+      return;
+    }
+    // AnimatePresence exit(150ms) + enter(150ms) + margin
+    lockUntilRef.current = Date.now() + 400;
+    const timer = window.setTimeout(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      if (el.scrollWidth > el.clientWidth + 1) {
+        normalWidthRef.current = el.scrollWidth;
+        setCompact(true);
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [resetKey, containerRef]);
 
   return compact;
 }

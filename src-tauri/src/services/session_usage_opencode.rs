@@ -13,7 +13,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::opencode_config::get_opencode_db_path;
+use crate::opencode_config::discover_opencode_profile_dbs;
 use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
@@ -41,10 +41,43 @@ struct OpenCodeMessageQueryResult {
     has_incomplete_usage: bool,
 }
 
-/// 同步 OpenCode 使用数据
+/// 同步 OpenCode 使用数据。
+///
+/// 遍历所有发现的 opencode profile 数据库（默认 + 命名 profile），
+/// 对每个调用 `sync_single_opencode_db`，累加结果。profile 维度编码进
+/// `provider_id` 字段（`_opencode_session` / `_opencode_session::<name>`），
+/// 复用现有 provider filter 链路，无需 schema 迁移。
 pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
-    let db_path = get_opencode_db_path();
+    let profile_dbs = discover_opencode_profile_dbs();
 
+    let mut aggregated = SessionSyncResult {
+        imported: 0,
+        skipped: 0,
+        files_scanned: 0,
+        errors: vec![],
+    };
+
+    for (profile_name, db_path) in &profile_dbs {
+        let mut result = sync_single_opencode_db(db, db_path, profile_name)?;
+        aggregated.imported += result.imported;
+        aggregated.skipped += result.skipped;
+        aggregated.files_scanned += result.files_scanned;
+        aggregated.errors.append(&mut result.errors);
+    }
+
+    Ok(aggregated)
+}
+
+/// 同步单个 OpenCode profile 数据库。
+///
+/// `profile` 为空字符串表示默认 profile（`provider_id = "_opencode_session"`），
+/// 否则为命名 profile（`provider_id = "_opencode_session::{profile}"`）。
+/// session_log_sync 水位线 key 仍基于 `db_path_str`，多 profile 天然不冲突（路径不同）。
+fn sync_single_opencode_db(
+    db: &Database,
+    db_path: &std::path::Path,
+    profile: &str,
+) -> Result<SessionSyncResult, AppError> {
     if !db_path.exists() {
         return Ok(SessionSyncResult {
             imported: 0,
@@ -60,7 +93,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
     // opencode 的数据库运行在 WAL 模式：新提交先落在 -wal 文件里，
     // 主库文件只有在 checkpoint 时才更新。因此必须同时考虑 -wal 的
     // mtime，否则会在 checkpoint 之前漏掉刚写入的会话。
-    let metadata = fs::metadata(&db_path)
+    let metadata = fs::metadata(db_path)
         .map_err(|e| AppError::Config(format!("无法读取 opencode.db 元数据: {e}")))?;
     let mut file_modified = metadata_modified_nanos(&metadata);
 
@@ -83,7 +116,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
     // 打开 opencode 的 SQLite 数据库（只读）
     let opencode_conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| AppError::Database(format!("无法打开 opencode.db: {e}")))?;
 
     let mut result = SessionSyncResult {
@@ -113,9 +146,16 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             Ok(query_result) => {
                 session_has_incomplete_usage = query_result.has_incomplete_usage;
                 for (message_id, msg_data) in &query_result.messages {
-                    let request_id = format!("opencode_session:{session_id}:{message_id}");
+                    // request_id 加 profile 前缀防跨 profile 去重碰撞：
+                    // 默认保持 `opencode_session:{session_id}:{message_id}`，
+                    // 命名 profile 用 `opencode_session:{profile}:{session_id}:{message_id}`。
+                    let request_id = if profile.is_empty() {
+                        format!("opencode_session:{session_id}:{message_id}")
+                    } else {
+                        format!("opencode_session:{profile}:{session_id}:{message_id}")
+                    };
 
-                    match insert_opencode_message(db, &request_id, msg_data, session_id) {
+                    match insert_opencode_message(db, &request_id, msg_data, session_id, profile) {
                         Ok(true) => result.imported += 1,
                         Ok(false) => result.skipped += 1,
                         Err(e) => {
@@ -161,7 +201,8 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
     if result.imported > 0 {
         log::info!(
-            "[OPENCODE-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个会话",
+            "[OPENCODE-SYNC] profile '{}' 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个会话",
+            if profile.is_empty() { "(default)" } else { profile },
             result.imported,
             result.skipped,
             sessions.len()
@@ -314,8 +355,17 @@ fn insert_opencode_message(
     request_id: &str,
     msg: &OpenCodeMessageData,
     session_id: &str,
+    profile: &str,
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
+
+    // profile 编码进 provider_id，复用现有 provider filter 链路：
+    // 默认 profile → "_opencode_session"；命名 profile → "_opencode_session::<name>"
+    let provider_id = if profile.is_empty() {
+        "_opencode_session".to_string()
+    } else {
+        format!("_opencode_session::{profile}")
+    };
 
     let created_at = if msg.timestamp_ms > 0 {
         msg.timestamp_ms / 1000
@@ -402,7 +452,7 @@ fn insert_opencode_message(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         rusqlite::params![
             request_id,
-            "_opencode_session",   // provider_id
+            &provider_id,         // provider_id (含 profile 维度)
             "opencode",            // app_type
             msg.model_id,
             msg.model_id,          // request_model = model

@@ -201,6 +201,12 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
 /// Session logs use placeholder provider_ids (e.g., `_session`, `_<app>_session`)
 /// that don't exist in the providers table — the CASE expression below is the
 /// authoritative mapping from placeholder to readable name.
+///
+/// OpenCode profile 维度：命名 profile 的 provider_id 为
+/// `_opencode_session::<profile_name>`，ELSE 分支内的 searched CASE 用 LIKE
+/// 匹配并截取 profile 名，渲染成 `OpenCode (<profile_name>)`。默认 profile
+/// (`_opencode_session`) 由前面的简单 WHEN 分支处理。substr 起始位置用
+/// `length('_opencode_session::') + 1` 推导，避免硬编码字符数出错。
 fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
     format!(
         "COALESCE({provider_alias}.name, CASE {log_alias}.provider_id \
@@ -208,7 +214,10 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_codex_session' THEN 'Codex (Session)' \
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          WHEN '_opencode_session' THEN 'OpenCode (Session)' \
-         ELSE {log_alias}.provider_id END)"
+         ELSE CASE WHEN {log_alias}.provider_id LIKE '_opencode_session::%' \
+              THEN 'OpenCode (' || substr({log_alias}.provider_id, length('_opencode_session::') + 1) || ')' \
+              ELSE {log_alias}.provider_id END \
+         END)"
     )
 }
 

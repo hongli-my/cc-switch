@@ -44,7 +44,6 @@ static TRAY_SECTION_SUBMENUS: Lazy<
 #[derive(Clone, Copy)]
 pub struct TrayTexts {
     pub show_main: &'static str,
-    pub open_website: &'static str,
     pub no_providers_label: &'static str,
     pub lightweight_mode: &'static str,
     pub quit: &'static str,
@@ -56,7 +55,6 @@ impl TrayTexts {
         match language {
             "en" => Self {
                 show_main: "Open main window",
-                open_website: "Open Official Website",
                 no_providers_label: "(no providers)",
                 lightweight_mode: "Lightweight Mode",
                 quit: "Quit",
@@ -64,7 +62,6 @@ impl TrayTexts {
             },
             "ja" => Self {
                 show_main: "メインウィンドウを開く",
-                open_website: "公式サイトを開く",
                 no_providers_label: "(プロバイダーなし)",
                 lightweight_mode: "軽量モード",
                 quit: "終了",
@@ -72,7 +69,6 @@ impl TrayTexts {
             },
             "zh-TW" => Self {
                 show_main: "開啟主介面",
-                open_website: "開啟官方網站",
                 no_providers_label: "(無供應商)",
                 lightweight_mode: "輕量模式",
                 quit: "退出",
@@ -80,7 +76,6 @@ impl TrayTexts {
             },
             _ => Self {
                 show_main: "打开主界面",
-                open_website: "打开官方网站",
                 no_providers_label: "(无供应商)",
                 lightweight_mode: "轻量模式",
                 quit: "退出",
@@ -103,14 +98,7 @@ pub struct TrayAppSection {
 pub const AUTO_SUFFIX: &str = "auto";
 pub const TRAY_ID: &str = "cc-switch";
 
-pub const TRAY_SECTIONS: [TrayAppSection; 3] = [
-    TrayAppSection {
-        app_type: AppType::Claude,
-        prefix: "claude_",
-        empty_id: "claude_empty",
-        header_label: "Claude",
-        log_name: "Claude",
-    },
+pub const TRAY_SECTIONS: [TrayAppSection; 2] = [
     TrayAppSection {
         app_type: AppType::Codex,
         prefix: "codex_",
@@ -294,6 +282,89 @@ fn format_usage_suffix(
         app_state.usage_cache.invalidate_subscription(app_type);
     }
     None
+}
+
+/// Token 数量的紧凑显示，复刻前端 `formatTokensShort`（src/components/usage/format.ts）。
+/// zh/zh-TW/ja 用「亿/万」，en 用 K/M/B；万与 K 用 1 位小数，亿/M/B 用 2 位。
+fn format_tokens_short(n: u64, language: &str) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    let v = n as f64;
+    match language {
+        "zh-TW" => {
+            if n >= 100_000_000 {
+                format!("{:.2} 億", v / 1e8)
+            } else if n >= 10_000 {
+                format!("{:.1} 萬", v / 1e4)
+            } else {
+                n.to_string()
+            }
+        }
+        "en" => {
+            if n >= 1_000_000_000 {
+                format!("{:.2}B", v / 1e9)
+            } else if n >= 1_000_000 {
+                format!("{:.2}M", v / 1e6)
+            } else if n >= 1_000 {
+                format!("{:.1}K", v / 1e3)
+            } else {
+                n.to_string()
+            }
+        }
+        _ => {
+            // zh / ja / 其他：与前端一致用简体「亿/万」
+            if n >= 100_000_000 {
+                format!("{:.2} 亿", v / 1e8)
+            } else if n >= 10_000 {
+                format!("{:.1} 万", v / 1e4)
+            } else {
+                n.to_string()
+            }
+        }
+    }
+}
+
+/// 查询今日（本地时区 00:00 至今）的 token 用量，格式化为托盘菜单 label。
+/// 三项分别用 ↓ 输入 / ↑ 输出 / ↻ 缓存 箭头区分；cache = cache_creation + cache_read。
+/// 查询失败或无数据时返回 None（由调用方决定占位文案）。
+///
+/// 注意：`proxy_request_logs.created_at` 存的是 Unix **秒**（见
+/// `proxy/usage/logger.rs` 的 `chrono::Utc::now().timestamp()`），与前端
+/// `usageRange.ts` 传的秒级 startDate 一致；这里必须用 `timestamp()`
+/// 而非 `timestamp_millis()`，否则毫秒值远大于秒级列导致查询恒为空。
+fn format_today_token_summary(app_state: &AppState, language: &str) -> Option<String> {
+    use chrono::{Local, TimeZone};
+
+    let now = Local::now();
+    let midnight = now.date_naive().and_hms_opt(0, 0, 0)?;
+    let local_midnight = match Local.from_local_datetime(&midnight) {
+        chrono::LocalResult::Single(dt) => dt,
+        chrono::LocalResult::Ambiguous(earliest, _) => earliest,
+        chrono::LocalResult::None => return None,
+    };
+    let start_sec = local_midnight.timestamp();
+
+    let summary = app_state
+        .db
+        .get_usage_summary(Some(start_sec), None, None, None, None)
+        .ok()?;
+
+    let input = format_tokens_short(summary.total_input_tokens, language).replace(' ', "");
+    let output = format_tokens_short(summary.total_output_tokens, language).replace(' ', "");
+    let cache = format_tokens_short(
+        summary.total_cache_creation_tokens + summary.total_cache_read_tokens,
+        language,
+    )
+    .replace(' ', "");
+    // ↓ U+2193 (input 接收) / ↑ U+2191 (output 发出) / ↻ U+21BB (cache 复用)
+    // 用几何箭头替代 emoji：emoji 在不同字体/主题下宽度不一（🗃️ 还带 VS16
+    // 更易错位），而箭头是等宽几何符号，渲染稳定且更窄；箭头方向即数据流
+    // 方向，语义比 emoji 更直觉。三项空格分隔，适配 macOS 菜单栏 title 的狭长空间。
+    Some(format!(
+        "\u{2193}{} \u{2191}{} \u{21BB}{}",
+        input, output, cache
+    ))
 }
 
 /// 对供应商列表排序：sort_index → created_at → name
@@ -502,22 +573,11 @@ pub fn create_tray_menu(
     let mut section_handles: std::collections::HashMap<AppType, Submenu<tauri::Wry>> =
         std::collections::HashMap::new();
 
-    // 顶部：打开主界面 / 打开官方网站
+    // 顶部：打开主界面
     let show_main_item =
         MenuItem::with_id(app, "show_main", tray_texts.show_main, true, None::<&str>)
             .map_err(|e| AppError::Message(format!("创建打开主界面菜单失败: {e}")))?;
-    let open_website_item = MenuItem::with_id(
-        app,
-        "open_website",
-        tray_texts.open_website,
-        true,
-        None::<&str>,
-    )
-    .map_err(|e| AppError::Message(format!("创建打开官方网站菜单失败: {e}")))?;
-    menu_builder = menu_builder
-        .item(&show_main_item)
-        .item(&open_website_item)
-        .separator();
+    menu_builder = menu_builder.item(&show_main_item).separator();
 
     // Pre-compute proxy running state (used to disable official providers in tray menu)
     let is_proxy_running = futures::executor::block_on(app_state.proxy_service.is_running());
@@ -632,10 +692,34 @@ pub fn create_tray_menu(
 /// 就地更新各 app 分区子菜单的标题（usage 后缀变化时走这条），
 /// 避免 `set_menu` 导致用户打开中的菜单被关闭。
 /// 句柄由上一次 `create_tray_menu` 填充；为空（从未构建过菜单）时无事发生。
-fn update_tray_usage_labels(app: &tauri::AppHandle) {
+///
+/// 同时把今日 token 用量写到托盘图标右侧文字（macOS NSStatusItem.title，
+/// Windows 为 no-op，Linux 需配合 icon 显示）。
+pub(crate) fn update_tray_usage_labels(app: &tauri::AppHandle) {
     let Some(app_state) = app.try_state::<AppState>() else {
         return;
     };
+
+    // 今日 token 用量 → 托盘图标右侧文字
+    let lang = crate::settings::get_settings()
+        .language
+        .as_deref()
+        .unwrap_or("zh")
+        .to_string();
+    let token_title = format_today_token_summary(app_state.inner(), &lang);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        match &token_title {
+            Some(title) => {
+                if let Err(e) = tray.set_title(Some(title.as_str())) {
+                    log::debug!("[Tray] 设置托盘 title 失败: {e}");
+                }
+            }
+            None => {
+                let _ = tray.set_title(None::<&str>);
+            }
+        }
+    }
+
     let handles = match TRAY_SECTION_SUBMENUS.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -724,11 +808,6 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
                     log::error!("退出轻量模式重建窗口失败: {e}");
                 }
-            }
-        }
-        "open_website" => {
-            if let Err(e) = app.opener().open_url("https://ccswitch.io", None::<String>) {
-                log::error!("打开官方网站失败: {e}");
             }
         }
         "lightweight_mode" => {
@@ -873,11 +952,15 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
     }
 
     join_all(script_futures).await;
+
+    // token 汇总来自本地 SQL，不依赖外部 API；无论本轮是否有 script future
+    // 都触发一次软更新，让今日 token 数字刷新到最新。
+    schedule_tray_refresh(app);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_script_summary, format_subscription_summary, TRAY_ID};
+    use super::{format_script_summary, format_subscription_summary, format_tokens_short, TRAY_ID};
     use crate::provider::{UsageData, UsageResult};
     use crate::services::subscription::{
         CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_GEMINI_FLASH,
@@ -889,6 +972,39 @@ mod tests {
     fn tray_id_is_unique_to_app() {
         assert_eq!(TRAY_ID, "cc-switch");
         assert_ne!(TRAY_ID, "main");
+    }
+
+    #[test]
+    fn format_tokens_short_zh_thresholds() {
+        // 与前端 formatTokensShort 对齐：0 → "0"；<1万原样；中文档位带空格（"1.2 万"）。
+        assert_eq!(format_tokens_short(0, "zh"), "0");
+        assert_eq!(format_tokens_short(999, "zh"), "999");
+        assert_eq!(format_tokens_short(12_345, "zh"), "1.2 万");
+        assert_eq!(format_tokens_short(123_456_789, "zh"), "1.23 亿");
+    }
+
+    #[test]
+    fn format_tokens_short_en_thresholds() {
+        // 英文档位无空格（"1.2K"）
+        assert_eq!(format_tokens_short(0, "en"), "0");
+        assert_eq!(format_tokens_short(999, "en"), "999");
+        assert_eq!(format_tokens_short(1_234, "en"), "1.2K");
+        assert_eq!(format_tokens_short(1_234_567, "en"), "1.23M");
+        assert_eq!(format_tokens_short(1_234_567_890, "en"), "1.23B");
+    }
+
+    #[test]
+    fn format_tokens_short_traditional_chinese_uses_complex_units() {
+        // zh-TW 用繁体「億/萬」
+        assert_eq!(format_tokens_short(12_345, "zh-TW"), "1.2 萬");
+        assert_eq!(format_tokens_short(123_456_789, "zh-TW"), "1.23 億");
+    }
+
+    #[test]
+    fn format_tokens_short_ja_falls_back_to_simplified_units() {
+        // ja 与前端一致走简体「亿/万」分支
+        assert_eq!(format_tokens_short(12_345, "ja"), "1.2 万");
+        assert_eq!(format_tokens_short(123_456_789, "ja"), "1.23 亿");
     }
 
     fn make_quota(tool: &str, success: bool, tiers: Vec<QuotaTier>) -> SubscriptionQuota {

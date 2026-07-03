@@ -1,4 +1,3 @@
-import { useCallback } from "react";
 import {
   useMutation,
   useQuery,
@@ -11,13 +10,6 @@ import { hermesApi } from "@/lib/api/hermes";
 import { providersApi } from "@/lib/api/providers";
 import type { HermesMemoryKind } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
-
-/**
- * Error code returned by the Rust `open_hermes_web_ui` command when probing
- * `/api/status` fails. Must match the string constant in
- * `src-tauri/src/commands/hermes.rs`.
- */
-export const HERMES_WEB_OFFLINE_ERROR = "hermes_web_offline";
 
 /**
  * Centralized query keys for all Hermes-related queries.
@@ -140,35 +132,4 @@ export function useToggleHermesMemoryEnabled() {
       });
     },
   });
-}
-
-/**
- * Returns a handler that probes the local Hermes Web UI, opens it in the
- * system browser, and surfaces a localized toast on failure. When
- * `onOffline` is provided, it replaces the default offline toast —
- * callers can use this to open a launch-dashboard confirm dialog instead.
- */
-export function useOpenHermesWebUI(onOffline?: () => void) {
-  const { t } = useTranslation();
-  return useCallback(
-    async (path?: string) => {
-      try {
-        await hermesApi.openWebUI(path);
-      } catch (error) {
-        const detail = extractErrorMessage(error);
-        if (detail === HERMES_WEB_OFFLINE_ERROR) {
-          if (onOffline) {
-            onOffline();
-          } else {
-            toast.error(t("hermes.webui.offline"));
-          }
-        } else {
-          toast.error(t("hermes.webui.openFailed"), {
-            description: detail || undefined,
-          });
-        }
-      }
-    },
-    [t, onOffline],
-  );
 }

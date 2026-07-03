@@ -64,6 +64,50 @@ pub fn get_opencode_db_path() -> PathBuf {
     get_opencode_data_dir().join("opencode.db")
 }
 
+/// 发现所有 opencode profile 的数据库路径。
+/// 返回 (profile_name, db_path) 列表。第一个永远是默认 profile（name 为空字符串）。
+/// 命名 profile 通过扫描 <data_dir>/profiles/*/opencode.db 发现。
+///
+/// profiles 目录从默认 db 路径的 parent 推导（例如
+/// `~/.local/share/opencode/opencode.db` → `~/.local/share/opencode/profiles/`）。
+/// 当 `OPENCODE_DB` 指向自定义路径时，profiles 仍从该路径的 parent/profiles 扫描。
+pub fn discover_opencode_profile_dbs() -> Vec<(String, PathBuf)> {
+    let default_db = get_opencode_db_path();
+    // 第一个永远是默认 profile（name 为空字符串），即使文件尚未创建也保留，
+    // 便于调用方按统一路径处理（sync 函数内部会再判存在性）。
+    let mut result = vec![(String::new(), default_db.clone())];
+
+    // profiles 目录：从默认 db 路径的 parent 推导
+    let profiles_dir = match default_db.parent() {
+        Some(p) => p.join("profiles"),
+        None => return result,
+    };
+
+    // 扫描 profiles/*/ 子目录；目录不存在等错误静默处理
+    let entries = match std::fs::read_dir(&profiles_dir) {
+        Ok(e) => e,
+        Err(_) => return result,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // 只处理子目录
+        if !path.is_dir() {
+            continue;
+        }
+        // 只收录含 opencode.db 文件的子目录（自动跳过 *-shm / *-wal）
+        let profile_db = path.join("opencode.db");
+        if profile_db.is_file() {
+            // profile 名 = 子目录名
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                result.push((name.to_string(), profile_db));
+            }
+        }
+    }
+
+    result
+}
+
 fn get_opencode_data_dir() -> PathBuf {
     // 尊重 XDG_DATA_HOME（按 XDG 规范，空字符串视为未设置）
     if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {

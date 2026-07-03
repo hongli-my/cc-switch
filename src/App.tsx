@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -39,8 +39,7 @@ import {
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
-import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
-import { hermesApi } from "@/lib/api/hermes";
+import { hermesKeys } from "@/hooks/useHermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useAutoCompact } from "@/hooks/useAutoCompact";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
@@ -81,6 +80,7 @@ import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
+import { UsageDashboard } from "@/components/usage/UsageDashboard";
 import { McpIcon } from "@/components/BrandIcons";
 import { Button } from "@/components/ui/button";
 import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
@@ -109,13 +109,8 @@ type View =
   | "openclawEnv"
   | "openclawTools"
   | "openclawAgents"
-  | "hermesMemory";
-
-interface SyncStatusUpdatedPayload {
-  source?: string;
-  status?: string;
-  error?: string;
-}
+  | "hermesMemory"
+  | "usage";
 
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
@@ -139,7 +134,7 @@ const getInitialApp = (): AppId => {
   return "claude";
 };
 
-const VIEW_STORAGE_KEY = "cc-switch-last-view";
+const VIEW_STORAGE_KEY = "cc-switch-last-view-v2";
 const VALID_VIEWS: View[] = [
   "providers",
   "settings",
@@ -155,6 +150,7 @@ const VALID_VIEWS: View[] = [
   "openclawTools",
   "openclawAgents",
   "hermesMemory",
+  "usage",
 ];
 
 const getInitialView = (): View => {
@@ -162,7 +158,7 @@ const getInitialView = (): View => {
   if (saved && VALID_VIEWS.includes(saved)) {
     return saved;
   }
-  return "providers";
+  return "usage";
 };
 
 function App() {
@@ -243,7 +239,31 @@ function App() {
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
   const toolbarRef = useRef<HTMLDivElement>(null);
-  const isToolbarCompact = useAutoCompact(toolbarRef);
+  const isToolbarCompact = useAutoCompact(toolbarRef, activeApp);
+
+  // The proxy/failover toggle block is unmounted for some apps (hermes,
+  // opencode, openclaw). Its disappearance would abruptly widen the toolbar
+  // and make the whole right-aligned header jump sideways on app switch.
+  // Measure its width while visible and reserve the same space with a spacer
+  // when hidden, so the toolbar width stays stable across switches.
+  const proxyBlockRef = useRef<HTMLDivElement>(null);
+  const [proxyBlockWidth, setProxyBlockWidth] = useState(0);
+  const showProxyBlock =
+    activeApp !== "opencode" &&
+    activeApp !== "openclaw" &&
+    activeApp !== "hermes";
+  useLayoutEffect(() => {
+    const el = proxyBlockRef.current;
+    if (el) {
+      const w = el.offsetWidth;
+      if (w > 0) setProxyBlockWidth(w);
+    }
+  }, [
+    activeApp,
+    currentView,
+    settingsData?.enableLocalProxy,
+    settingsData?.enableFailoverToggle,
+  ]);
 
   useUsageCacheBridge();
 
@@ -380,38 +400,6 @@ function App() {
       console.error("[App] Failed to update tray menu", error);
     }
   });
-
-  useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "webdav-sync-status-updated",
-    async (payload) => {
-      const statusPayload = payload ?? {};
-      await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      if (statusPayload.source !== "auto" || statusPayload.status !== "error") {
-        return;
-      }
-      toast.error(
-        t("settings.webdavSync.autoSyncFailedToast", {
-          error: statusPayload.error || t("common.unknown"),
-        }),
-      );
-    },
-  );
-
-  useTauriEvent<SyncStatusUpdatedPayload | null | undefined>(
-    "s3-sync-status-updated",
-    async (payload) => {
-      const statusPayload = payload ?? {};
-      await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      if (statusPayload.source !== "auto" || statusPayload.status !== "error") {
-        return;
-      }
-      toast.error(
-        t("settings.s3Sync.autoSyncFailedToast", {
-          error: statusPayload.error || t("common.unknown"),
-        }),
-      );
-    },
-  );
 
   useTauriEvent<{ appType: string; providerName: string }>(
     "proxy-official-warning",
@@ -604,11 +592,6 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, []);
-
-  const [launchDashboardOpen, setLaunchDashboardOpen] = useState(false);
-  const openHermesWebUI = useOpenHermesWebUI(() =>
-    setLaunchDashboardOpen(true),
-  );
 
   const handleOpenWebsite = async (url: string) => {
     try {
@@ -933,6 +916,13 @@ function App() {
             </div>
           );
 
+        case "usage":
+          return (
+            <div className="px-6 pt-4 flex-1 min-h-0 overflow-y-auto overflow-x-hidden pb-12">
+              <UsageDashboard />
+            </div>
+          );
+
         case "sessions":
           return (
             <SessionManagerPage
@@ -1133,7 +1123,7 @@ function App() {
             className="flex items-center gap-1"
             style={{ WebkitAppRegion: "no-drag" } as any}
           >
-            {currentView !== "providers" ? (
+            {currentView !== "providers" && currentView !== "usage" ? (
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
@@ -1207,14 +1197,11 @@ function App() {
                     setCurrentView("settings");
                   }}
                 />
-                {isCurrentAppTakeoverActive && (
+                {currentView === "providers" && (
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => {
-                      setSettingsDefaultTab("usage");
-                      setCurrentView("settings");
-                    }}
+                    onClick={() => setCurrentView("usage")}
                     title={t("usage.title", {
                       defaultValue: "使用统计",
                     })}
@@ -1223,16 +1210,28 @@ function App() {
                     <BarChart2 className="w-4 h-4" />
                   </Button>
                 )}
+                {currentView === "usage" && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setCurrentView("providers")}
+                    title={t("providers.title", {
+                      defaultValue: "供应商",
+                    })}
+                    className="hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <LayoutDashboard className="w-4 h-4" />
+                  </Button>
+                )}
               </div>
             )}
           </div>
 
           <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
             {currentView === "providers" &&
-              activeApp !== "opencode" &&
-              activeApp !== "openclaw" &&
-              activeApp !== "hermes" && (
+              (showProxyBlock ? (
                 <div
+                  ref={proxyBlockRef}
                   className="flex shrink-0 items-center gap-1.5"
                   style={{ WebkitAppRegion: "no-drag" } as any}
                 >
@@ -1248,7 +1247,13 @@ function App() {
                       <FailoverToggle activeApp={activeApp} />
                     )}
                 </div>
-              )}
+              ) : (
+                <div
+                  className="shrink-0"
+                  style={{ width: proxyBlockWidth }}
+                  aria-hidden
+                />
+              ))}
             <div
               ref={toolbarRef}
               className="flex flex-1 min-w-0 overflow-x-hidden items-center py-4 pr-2"
@@ -1375,21 +1380,16 @@ function App() {
                     />
 
                     <div className="flex items-center gap-1 p-1 bg-muted rounded-xl">
-                      <AnimatePresence mode="wait">
-                        <motion.div
-                          key={
-                            activeApp === "openclaw"
-                              ? "openclaw"
-                              : activeApp === "hermes"
-                                ? "hermes"
-                                : "default"
-                          }
-                          className="flex items-center gap-1"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          exit={{ opacity: 0 }}
-                          transition={{ duration: 0.15 }}
-                        >
+                      <div
+                        key={
+                          activeApp === "openclaw"
+                            ? "openclaw"
+                            : activeApp === "hermes"
+                              ? "hermes"
+                              : "default"
+                        }
+                        className="flex items-center gap-1"
+                      >
                           {activeApp === "hermes" ? (
                             <>
                               <Button
@@ -1413,11 +1413,11 @@ function App() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => void openHermesWebUI()}
+                                onClick={() => setCurrentView("sessions")}
                                 className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                title={t("hermes.webui.open")}
+                                title={t("sessionManager.title")}
                               >
-                                <LayoutDashboard className="w-4 h-4" />
+                                <History className="w-4 h-4" />
                               </Button>
                               <Button
                                 variant="ghost"
@@ -1529,8 +1529,7 @@ function App() {
                               </Button>
                             </>
                           )}
-                        </motion.div>
-                      </AnimatePresence>
+                      </div>
                     </div>
 
                     <Button
@@ -1610,28 +1609,6 @@ function App() {
         }
         onConfirm={() => void handleConfirmAction()}
         onCancel={() => setConfirmAction(null)}
-      />
-
-      <ConfirmDialog
-        isOpen={launchDashboardOpen}
-        title={t("hermes.webui.launchConfirmTitle")}
-        message={t("hermes.webui.launchConfirmMessage")}
-        confirmText={t("hermes.webui.launchConfirmAction")}
-        variant="info"
-        onConfirm={() => {
-          setLaunchDashboardOpen(false);
-          void (async () => {
-            try {
-              await hermesApi.launchDashboard();
-              toast.success(t("hermes.webui.launching"));
-            } catch (error) {
-              toast.error(t("hermes.webui.launchFailed"), {
-                description: extractErrorMessage(error) || undefined,
-              });
-            }
-          })();
-        }}
-        onCancel={() => setLaunchDashboardOpen(false)}
       />
 
       <DeepLinkImportDialog />
