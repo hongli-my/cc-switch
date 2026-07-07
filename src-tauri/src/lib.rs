@@ -64,7 +64,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
@@ -896,18 +896,6 @@ pub fn run() {
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .tooltip("CC Switch") // 鼠标悬停提示
-                .on_tray_icon_event(|tray, event| match event {
-                    // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
-                    // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
-                    // refresh_all_usage_in_tray 内部有 10 秒防抖。
-                    TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. } => {
-                        let app = tray.app_handle().clone();
-                        tauri::async_runtime::spawn(async move {
-                            crate::tray::refresh_all_usage_in_tray(&app).await;
-                        });
-                    }
-                    _ => log::debug!("unhandled event {event:?}"),
-                })
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     tray::handle_tray_menu_event(app, &event.id.0);
@@ -939,9 +927,6 @@ pub fn run() {
             let _tray = tray_builder.build(app)?;
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
-
-            // 初始化托盘图标右侧的今日 token 用量文字（macOS NSStatusItem.title）
-            crate::tray::update_tray_usage_labels(app.handle());
 
             // 从数据库加载日志配置并应用
             {
