@@ -556,6 +556,40 @@ impl SkillService {
         })
     }
 
+    /// 返回 opencode 某 profile 的 skills 目录。
+    ///
+    /// - `profile=""` → `~/.config/opencode/skills/`（default，当前行为）
+    /// - `profile="foo"` → `~/.config/opencode/profiles/foo/skills/`
+    ///
+    /// 尊重 settings.json 的 opencode override_dir（与 `get_app_skills_dir`
+    /// 的 OpenCode 分支使用相同的 base 解析逻辑，即 `opencode_config::get_opencode_dir()`）。
+    fn get_opencode_skills_dir_for_profile(profile: &str) -> Result<PathBuf> {
+        let base = crate::opencode_config::get_opencode_dir();
+        let dir = if profile.is_empty() {
+            base.join("skills")
+        } else {
+            base.join("profiles").join(profile).join("skills")
+        };
+        Ok(dir)
+    }
+
+    /// 解析 skill 实际分发目标的 opencode profile 列表。
+    ///
+    /// - `apps.opencode == false` → 空 vec（不分发）
+    /// - `apps.opencode == true` 且 `opencode_profiles` 非空 → 原样返回
+    /// - `apps.opencode == true` 且 `opencode_profiles` 为空 → `[""]`（仅 default，
+    ///   保持升级前行为；与 DAO 读取层兼容逻辑一致）
+    fn resolve_opencode_profiles(skill: &InstalledSkill) -> Vec<String> {
+        if !skill.apps.opencode {
+            return Vec::new();
+        }
+        if skill.opencode_profiles.is_empty() {
+            vec![String::new()]
+        } else {
+            skill.opencode_profiles.clone()
+        }
+    }
+
     // ========== 统一管理方法 ==========
 
     /// 获取所有已安装的 Skills
@@ -610,7 +644,7 @@ impl SkillService {
                     let mut updated = existing.clone();
                     updated.apps.set_enabled_for(current_app, true);
                     db.save_skill(&updated)?;
-                    Self::sync_to_app_dir(&updated.directory, current_app)?;
+                    Self::sync_skill_to_app(&updated, current_app)?;
                     log::info!(
                         "Skill {} 已存在，更新 {:?} 启用状态",
                         updated.name,
@@ -762,13 +796,14 @@ impl SkillService {
             installed_at: chrono::Utc::now().timestamp(),
             content_hash,
             updated_at: 0,
+            opencode_profiles: Vec::new(),
         };
 
         // 保存到数据库
         db.save_skill(&installed_skill)?;
 
         // 同步到当前应用目录
-        Self::sync_to_app_dir(&install_name, current_app)?;
+        Self::sync_skill_to_app(&installed_skill, current_app)?;
 
         log::info!(
             "Skill {} 安装成功，已启用 {:?}",
@@ -1100,13 +1135,14 @@ impl SkillService {
             installed_at: skill.installed_at,
             content_hash: new_hash,
             updated_at: chrono::Utc::now().timestamp(),
+            opencode_profiles: skill.opencode_profiles.clone(),
         };
 
         db.save_skill(&updated_skill)?;
 
         // 同步到所有已启用的应用目录
         for app in updated_skill.apps.enabled_apps() {
-            if let Err(e) = Self::sync_to_app_dir(&updated_skill.directory, &app) {
+            if let Err(e) = Self::sync_skill_to_app(&updated_skill, &app) {
                 log::warn!("同步更新后的 skill 到 {:?} 失败: {e}", app);
             }
         }
@@ -1334,7 +1370,7 @@ impl SkillService {
         }
 
         if !restored_skill.apps.is_empty() {
-            if let Err(err) = Self::sync_to_app_dir(&restored_skill.directory, current_app) {
+            if let Err(err) = Self::sync_skill_to_app(&restored_skill, current_app) {
                 let _ = db.delete_skill(&restored_skill.id);
                 let _ = fs::remove_dir_all(&restore_path);
                 return Err(err);
@@ -1365,7 +1401,7 @@ impl SkillService {
 
         // 同步文件
         if enabled {
-            Self::sync_to_app_dir(&skill.directory, app)?;
+            Self::sync_skill_to_app(&skill, app)?;
         } else {
             Self::remove_from_app(&skill.directory, app)?;
         }
@@ -1534,6 +1570,7 @@ impl SkillService {
                 installed_at: chrono::Utc::now().timestamp(),
                 content_hash,
                 updated_at: 0,
+                opencode_profiles: Vec::new(),
             };
 
             // 保存到数据库
@@ -1583,6 +1620,10 @@ impl SkillService {
     /// - Auto: 优先尝试 symlink，失败时回退到 copy
     /// - Symlink: 仅使用 symlink
     /// - Copy: 仅使用文件复制
+    ///
+    /// 注意：对 OpenCode 此函数仅同步到 **default** profile 目录
+    /// （`~/.config/opencode/skills/`）。多 profile 分发请使用
+    /// [`sync_opencode_skill`](Self::sync_opencode_skill)。
     pub fn sync_to_app_dir(directory: &str, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
@@ -1597,25 +1638,32 @@ impl SkillService {
         fs::create_dir_all(&app_dir)?;
 
         let dest = app_dir.join(directory);
+        let label = format!("{app:?}");
+        Self::sync_to_dest_dir(&source, &dest, directory, &label)
+    }
 
+    /// 底层同步：把 SSOT 中的 skill 源目录同步到指定 dest 目录。
+    ///
+    /// 提取自 `sync_to_app_dir`，供多 profile 分发复用。`label` 仅用于日志。
+    fn sync_to_dest_dir(source: &Path, dest: &Path, directory: &str, label: &str) -> Result<()> {
         let sync_method = Self::get_sync_method();
 
         match sync_method {
             SyncMethod::Auto => {
-                if dest.exists() && !Self::is_symlink(&dest) {
-                    Self::replace_dest_with_copy(&source, &dest, directory)?;
-                    log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                if dest.exists() && !Self::is_symlink(dest) {
+                    Self::replace_dest_with_copy(source, dest, directory)?;
+                    log::debug!("Skill {directory} 已通过复制同步到 {label}");
                     return Ok(());
                 }
 
-                if Self::is_symlink(&dest) {
-                    Self::remove_path(&dest)?;
+                if Self::is_symlink(dest) {
+                    Self::remove_path(dest)?;
                 }
 
                 // 优先尝试 symlink
-                match Self::create_symlink(&source, &dest) {
+                match Self::create_symlink(source, dest) {
                     Ok(()) => {
-                        log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
+                        log::debug!("Skill {directory} 已通过 symlink 同步到 {label}");
                         return Ok(());
                     }
                     Err(err) => {
@@ -1627,23 +1675,149 @@ impl SkillService {
                     }
                 }
                 // Fallback 到 copy
-                Self::replace_dest_with_copy(&source, &dest, directory)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                Self::replace_dest_with_copy(source, dest, directory)?;
+                log::debug!("Skill {directory} 已通过复制同步到 {label}");
             }
             SyncMethod::Symlink => {
-                if dest.exists() || Self::is_symlink(&dest) {
-                    Self::remove_path(&dest)?;
+                if dest.exists() || Self::is_symlink(dest) {
+                    Self::remove_path(dest)?;
                 }
-                Self::create_symlink(&source, &dest)?;
-                log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
+                Self::create_symlink(source, dest)?;
+                log::debug!("Skill {directory} 已通过 symlink 同步到 {label}");
             }
             SyncMethod::Copy => {
-                Self::replace_dest_with_copy(&source, &dest, directory)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                Self::replace_dest_with_copy(source, dest, directory)?;
+                log::debug!("Skill {directory} 已通过复制同步到 {label}");
             }
         }
 
         Ok(())
+    }
+
+    /// 将一个 skill 按 `opencode_profiles` 分发到各 opencode profile 目录，
+    /// 并清理不再选中的 profile 目标。
+    ///
+    /// - 选中集合：[`resolve_opencode_profiles`](Self::resolve_opencode_profiles)
+    /// - 对每个选中 profile：同步 SSOT skill 到
+    ///   [`get_opencode_skills_dir_for_profile`](Self::get_opencode_skills_dir_for_profile)
+    /// - 清理：遍历 `discover_opencode_config_profiles()` 返回的全部 profile，
+    ///   对不在选中集合里的，移除该 skill 的链接/副本。
+    pub fn sync_opencode_skill(skill: &InstalledSkill) -> Result<()> {
+        let ssot_dir = Self::get_ssot_dir()?;
+        let source = ssot_dir.join(&skill.directory);
+
+        let selected = Self::resolve_opencode_profiles(skill);
+        let selected_set: HashSet<&str> = selected.iter().map(|s| s.as_str()).collect();
+
+        // 1. 同步到选中的 profile
+        if !selected.is_empty() {
+            Self::validate_sync_source_dir(&source, &skill.directory)?;
+            for profile in &selected {
+                let dir = Self::get_opencode_skills_dir_for_profile(profile)?;
+                fs::create_dir_all(&dir)?;
+                let dest = dir.join(&skill.directory);
+                let label = format!("opencode profile {:?}", profile);
+                Self::sync_to_dest_dir(&source, &dest, &skill.directory, &label)?;
+            }
+        }
+
+        // 2. 清理未选中的 profile 目标
+        for profile in crate::opencode_config::discover_opencode_config_profiles() {
+            if selected_set.contains(profile.as_str()) {
+                continue;
+            }
+            let dir = match Self::get_opencode_skills_dir_for_profile(&profile) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let dest = dir.join(&skill.directory);
+            if dest.exists() || Self::is_symlink(&dest) {
+                if let Err(e) = Self::remove_path(&dest) {
+                    log::warn!(
+                        "清理 opencode profile {:?} 中的 skill {} 失败: {e}",
+                        profile,
+                        skill.directory
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 从所有 opencode profile 目录移除指定 skill（含 default）。
+    ///
+    /// 用于卸载 / 关闭 opencode 开关时清理全部分发目标。
+    pub fn remove_opencode_skill_from_all_profiles(directory: &str) -> Result<()> {
+        for profile in crate::opencode_config::discover_opencode_config_profiles() {
+            let dir = Self::get_opencode_skills_dir_for_profile(&profile)?;
+            let dest = dir.join(directory);
+            if dest.exists() || Self::is_symlink(&dest) {
+                if let Err(e) = Self::remove_path(&dest) {
+                    log::warn!(
+                        "从 opencode profile {:?} 移除 skill {} 失败: {e}",
+                        profile,
+                        directory
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 设置 skill 的 opencode profile 分发目标，并重新分发。
+    ///
+    /// 1. 更新 DB `opencode_profiles`（聚合开关 `apps.opencode` 同步为
+    ///    `!profiles.is_empty()`）
+    /// 2. 重新分发：同步到选中的 profile，清理未选中的 profile 目标
+    ///
+    /// 返回更新后的 skill。
+    pub fn set_opencode_profiles(
+        db: &Arc<Database>,
+        id: &str,
+        profiles: Vec<String>,
+    ) -> Result<InstalledSkill> {
+        // 去重，保留顺序；空串只保留一个
+        let mut deduped: Vec<String> = Vec::new();
+        for p in profiles {
+            if !deduped.iter().any(|e| e == &p) {
+                deduped.push(p);
+            }
+        }
+
+        let mut skill = db
+            .get_installed_skill(id)?
+            .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
+
+        db.update_skill_opencode_profiles(id, &deduped)?;
+        skill.opencode_profiles = deduped;
+        skill.apps.opencode = !skill.opencode_profiles.is_empty();
+
+        // 重新分发（含清理未选中目标）
+        Self::sync_opencode_skill(&skill)?;
+
+        log::info!(
+            "Skill {} 的 opencode profiles 已更新为 {:?}",
+            skill.name,
+            skill.opencode_profiles
+        );
+
+        Ok(skill)
+    }
+
+    /// 将单个 skill 同步到指定应用。
+    ///
+    /// 对 OpenCode 走多 profile 分发（[`sync_opencode_skill`](Self::sync_opencode_skill)），
+    /// 其他应用走 [`sync_to_app_dir`](Self::sync_to_app_dir)（default 目录）。
+    ///
+    /// 供 install / toggle / update / restore / zip 等单 skill 入口复用，
+    /// 确保 OpenCode profile 选择在状态变更时立即生效。
+    fn sync_skill_to_app(skill: &InstalledSkill, app: &AppType) -> Result<()> {
+        if matches!(app, AppType::OpenCode) {
+            Self::sync_opencode_skill(skill)
+        } else {
+            Self::sync_to_app_dir(&skill.directory, app)
+        }
     }
 
     /// 复制 Skill 到应用目录（保留用于向后兼容）
@@ -1755,9 +1929,17 @@ impl SkillService {
     }
 
     /// 从应用目录删除 Skill（支持 symlink 和真实目录）
+    /// 从应用目录删除 Skill（支持 symlink 和真实目录）
+    ///
+    /// 对 OpenCode：从所有 profile 目录（含 default）移除，因为分发目标可能多个。
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
+        }
+
+        // OpenCode：分发目标可能落在任意 profile 目录，全部清理
+        if matches!(app, AppType::OpenCode) {
+            return Self::remove_opencode_skill_from_all_profiles(directory);
         }
 
         let app_dir = Self::get_app_skills_dir(app)?;
@@ -1772,9 +1954,17 @@ impl SkillService {
     }
 
     /// 同步所有已启用的 Skills 到指定应用
+    ///
+    /// 对 OpenCode：按每个 skill 的 `opencode_profiles` 分发到对应 profile 目录，
+    /// 并清理所有 profile 目录中失效的链接/副本（含被关闭或已卸载的 skill）。
     pub fn sync_to_app(db: &Arc<Database>, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
+        }
+
+        // OpenCode 走多 profile 分发路径
+        if matches!(app, AppType::OpenCode) {
+            return Self::sync_opencode_all(db);
         }
 
         let skills = db.get_all_installed_skills()?;
@@ -1812,6 +2002,61 @@ impl SkillService {
         for skill in skills.values() {
             if skill.apps.is_enabled_for(app) {
                 Self::sync_to_app_dir(&skill.directory, app)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 同步所有 skill 到 opencode（多 profile 分发 + 全局清理）。
+    ///
+    /// - 对每个 skill 调用 [`sync_opencode_skill`](Self::sync_opencode_skill)：
+    ///   启用的同步到选中 profile 并清理未选中；禁用的清理所有 profile 目标。
+    /// - 额外扫描所有 profile 目录，移除指向 SSOT 但已无对应 skill 记录的孤儿链接。
+    fn sync_opencode_all(db: &Arc<Database>) -> Result<()> {
+        let skills = db.get_all_installed_skills()?;
+        let ssot_dir = Self::get_ssot_dir()?;
+
+        let indexed_skills: HashMap<String, &InstalledSkill> = skills
+            .values()
+            .map(|skill| (skill.directory.to_lowercase(), skill))
+            .collect();
+
+        // 1. 逐 skill 分发（sync_opencode_skill 内部处理选中同步 + 未选中清理）
+        for skill in skills.values() {
+            if let Err(e) = Self::sync_opencode_skill(skill) {
+                log::warn!("同步 skill {} 到 opencode profiles 失败: {e}", skill.directory);
+            }
+        }
+
+        // 2. 全局孤儿清理：扫描每个 profile 目录，移除指向 SSOT 但无对应 skill 的链接
+        for profile in crate::opencode_config::discover_opencode_config_profiles() {
+            let dir = match Self::get_opencode_skills_dir_for_profile(&profile) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if !dir.exists() {
+                continue;
+            }
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+                // 已管理的 skill 已由 sync_opencode_skill 处理，跳过
+                if indexed_skills.contains_key(&dir_name.to_lowercase()) {
+                    continue;
+                }
+                if Self::is_symlink_to_ssot(&path, &ssot_dir) {
+                    if let Err(e) = Self::remove_path(&path) {
+                        log::warn!("清理 opencode profile {:?} 孤儿链接 {} 失败: {e}", profile, dir_name);
+                    }
+                }
             }
         }
 
@@ -2655,13 +2900,14 @@ impl SkillService {
                 installed_at: chrono::Utc::now().timestamp(),
                 content_hash,
                 updated_at: 0,
+                opencode_profiles: Vec::new(),
             };
 
             // 保存到数据库
             db.save_skill(&skill)?;
 
             // 同步到当前应用目录
-            Self::sync_to_app_dir(&install_name, current_app)?;
+            Self::sync_skill_to_app(&skill, current_app)?;
 
             log::info!(
                 "Skill {} installed from ZIP, enabled for {:?}",
@@ -3042,6 +3288,7 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
             installed_at: chrono::Utc::now().timestamp(),
             content_hash,
             updated_at: 0,
+            opencode_profiles: Vec::new(),
         };
 
         db.save_skill(&skill)?;

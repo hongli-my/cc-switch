@@ -5,19 +5,30 @@
 //! - SSOT 存储在 ~/.cc-switch/skills/
 
 use crate::app_config::{AppType, InstalledSkill, UnmanagedSkill};
-use crate::error::format_skill_error;
+use crate::error::{format_skill_error, AppError};
 use crate::services::skill::{
     DiscoverableSkill, ImportSkillSelection, MigrationResult, Skill, SkillBackupEntry, SkillRepo,
     SkillService, SkillStorageLocation, SkillUninstallResult, SkillUpdateInfo,
     SkillsShSearchResult,
 };
 use crate::store::AppState;
+use serde::Serialize;
 use std::str::FromStr;
 use std::sync::Arc;
 use tauri::State;
 
 /// SkillService 状态包装
 pub struct SkillServiceState(pub Arc<SkillService>);
+
+/// OpenCode profile 信息（用于 skill 分发目标选择）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeProfileInfo {
+    /// profile 名；空串表示 default/整体 profile
+    pub name: String,
+    /// 是否为 default profile
+    pub is_default: bool,
+}
 
 /// 解析 app 参数为 AppType
 fn parse_app_type(app: &str) -> Result<AppType, String> {
@@ -95,6 +106,41 @@ pub fn toggle_skill_app(
     let app_type = parse_app_type(&app)?;
     SkillService::toggle_app(&app_state.db, &id, &app_type, enabled).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// 设置 Skill 的 OpenCode profile 分发目标
+///
+/// - `profiles` 为空表示关闭 opencode 分发（清空所有 profile 目标）
+/// - `profiles` 含空串 `""` 表示分发到 default/整体 profile
+/// - 命名 profile 分发到 `~/.config/opencode/profiles/<name>/skills/`
+///
+/// 同步更新聚合开关 `apps.opencode`（profiles 非空时为 true），
+/// 并立即重新分发（同步到选中 profile，清理未选中 profile 目标）。
+#[tauri::command]
+pub fn set_skill_opencode_profiles(
+    id: String,
+    profiles: Vec<String>,
+    app_state: State<'_, AppState>,
+) -> Result<bool, AppError> {
+    SkillService::set_opencode_profiles(&app_state.db, &id, profiles)
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    Ok(true)
+}
+
+/// 列出所有可用的 OpenCode profile（用于 skill 分发目标选择）
+///
+/// 第一个永远是 default profile（name 为空串），其后是排序后的命名 profile。
+#[tauri::command]
+pub fn list_opencode_profiles() -> Result<Vec<OpenCodeProfileInfo>, AppError> {
+    let profiles = crate::opencode_config::discover_opencode_config_profiles();
+    let result = profiles
+        .into_iter()
+        .map(|name| {
+            let is_default = name.is_empty();
+            OpenCodeProfileInfo { name, is_default }
+        })
+        .collect();
+    Ok(result)
 }
 
 /// 扫描未管理的 Skills

@@ -33,9 +33,19 @@ export interface InstalledSkill {
   repoBranch?: string;
   readmeUrl?: string;
   apps: SkillApps;
+  /** OpenCode profile 分发目标（"" = default/整体；命名字符串 = profile 名）。空数组=未分发 */
+  opencodeProfiles?: string[];
   installedAt: number;
   contentHash?: string;
   updatedAt: number;
+}
+
+/** OpenCode profile 信息（skill 分发目标选择用） */
+export interface OpenCodeProfile {
+  /** profile 名；空串表示 default/整体 profile */
+  name: string;
+  /** 是否为 default profile */
+  isDefault: boolean;
 }
 
 export interface SkillUninstallResult {
@@ -175,6 +185,19 @@ export const skillsApi = {
   /** 切换 Skill 的应用启用状态 */
   async toggleApp(id: string, app: AppId, enabled: boolean): Promise<boolean> {
     return await invoke("toggle_skill_app", { id, app, enabled });
+  },
+
+  /** 设置 Skill 的 OpenCode profile 分发目标（空数组=关闭 opencode 分发） */
+  async setOpencodeProfiles(
+    id: string,
+    profiles: string[],
+  ): Promise<boolean> {
+    return await invoke("set_skill_opencode_profiles", { id, profiles });
+  },
+
+  /** 列出所有可用的 OpenCode profile（含 default） */
+  async listOpencodeProfiles(): Promise<OpenCodeProfile[]> {
+    return await invoke("list_opencode_profiles");
   },
 
   /** 扫描未管理的 Skills */

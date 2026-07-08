@@ -14,6 +14,19 @@ use indexmap::IndexMap;
 use rusqlite::params;
 
 impl Database {
+    /// 解析 skills 表中的 opencode_profiles 列（JSON 字符串）为 Vec<String>。
+    ///
+    /// 旧数据兼容：若读出为空数组 `[]` 且 `apps.opencode == true`，则视为
+    /// `vec!["".to_string()]`（仅 default profile），保持升级前行为。
+    fn parse_opencode_profiles(raw: &str, opencode_enabled: bool) -> Vec<String> {
+        let parsed: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+        if parsed.is_empty() && opencode_enabled {
+            vec![String::new()]
+        } else {
+            parsed
+        }
+    }
+
     // ========== InstalledSkill CRUD ==========
 
     /// 获取所有已安装的 Skills
@@ -23,13 +36,15 @@ impl Database {
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
                         readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode,
-                        enabled_hermes, installed_at, content_hash, updated_at
+                        enabled_hermes, installed_at, content_hash, updated_at, opencode_profiles
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let skill_iter = stmt
             .query_map([], |row| {
+                let opencode_enabled: bool = row.get(11)?;
+                let opencode_profiles_raw: String = row.get::<_, String>(16).unwrap_or_else(|_| "[]".to_string());
                 Ok(InstalledSkill {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -43,12 +58,13 @@ impl Database {
                         claude: row.get(8)?,
                         codex: row.get(9)?,
                         gemini: row.get(10)?,
-                        opencode: row.get(11)?,
+                        opencode: opencode_enabled,
                         hermes: row.get(12)?,
                     },
                     installed_at: row.get(13)?,
                     content_hash: row.get(14)?,
                     updated_at: row.get::<_, i64>(15).unwrap_or(0),
+                    opencode_profiles: Self::parse_opencode_profiles(&opencode_profiles_raw, opencode_enabled),
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -68,12 +84,14 @@ impl Database {
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
                         readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode,
-                        enabled_hermes, installed_at, content_hash, updated_at
+                        enabled_hermes, installed_at, content_hash, updated_at, opencode_profiles
                  FROM skills WHERE id = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let result = stmt.query_row([id], |row| {
+            let opencode_enabled: bool = row.get(11)?;
+            let opencode_profiles_raw: String = row.get::<_, String>(16).unwrap_or_else(|_| "[]".to_string());
             Ok(InstalledSkill {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -87,12 +105,13 @@ impl Database {
                     claude: row.get(8)?,
                     codex: row.get(9)?,
                     gemini: row.get(10)?,
-                    opencode: row.get(11)?,
+                    opencode: opencode_enabled,
                     hermes: row.get(12)?,
                 },
                 installed_at: row.get(13)?,
                 content_hash: row.get(14)?,
                 updated_at: row.get::<_, i64>(15).unwrap_or(0),
+                opencode_profiles: Self::parse_opencode_profiles(&opencode_profiles_raw, opencode_enabled),
             })
         });
 
@@ -106,12 +125,14 @@ impl Database {
     /// 保存 Skill（添加或更新）
     pub fn save_skill(&self, skill: &InstalledSkill) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let opencode_profiles_json = serde_json::to_string(&skill.opencode_profiles)
+            .map_err(|e| AppError::JsonSerialize { source: e })?;
         conn.execute(
             "INSERT OR REPLACE INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
               readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
-              installed_at, content_hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              installed_at, content_hash, updated_at, opencode_profiles)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 skill.id,
                 skill.name,
@@ -129,6 +150,7 @@ impl Database {
                 skill.installed_at,
                 skill.content_hash,
                 skill.updated_at,
+                opencode_profiles_json,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -176,6 +198,28 @@ impl Database {
             .execute(
                 "UPDATE skills SET content_hash = ?1, updated_at = ?2 WHERE id = ?3",
                 params![content_hash, updated_at, id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    /// 更新 Skill 的 OpenCode profile 分发目标。
+    ///
+    /// 同时更新聚合开关 `enabled_opencode`（profiles 非空时为 true）。
+    /// 不触碰其他 apps 列，避免误清空。
+    pub fn update_skill_opencode_profiles(
+        &self,
+        id: &str,
+        profiles: &[String],
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let profiles_json = serde_json::to_string(profiles)
+            .map_err(|e| AppError::JsonSerialize { source: e })?;
+        let opencode_enabled = !profiles.is_empty();
+        let affected = conn
+            .execute(
+                "UPDATE skills SET opencode_profiles = ?1, enabled_opencode = ?2 WHERE id = ?3",
+                params![profiles_json, opencode_enabled, id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)

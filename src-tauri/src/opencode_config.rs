@@ -108,6 +108,47 @@ pub fn discover_opencode_profile_dbs() -> Vec<(String, PathBuf)> {
     result
 }
 
+/// 发现所有 opencode profile 名（用于 skill 分发目标）。
+///
+/// 扫描 `<config_dir>/profiles/*/` 子目录名。第一个元素永远是默认 profile
+/// （name 为空串 `""`，对应 `~/.config/opencode/skills/`），其后是排序后的
+/// 命名 profile。profiles 目录不存在等错误静默返回 `vec!["".to_string()]`。
+///
+/// 注意：这里扫描的是 **config 目录**（`get_opencode_dir()`，受 settings.json
+/// override_dir 影响），与 `discover_opencode_profile_dbs`（扫描 data 目录）
+/// 不同——OpenCode 的 profile 在 config 与 data 两侧都用同名子目录。
+pub fn discover_opencode_config_profiles() -> Vec<String> {
+    let config_dir = get_opencode_dir();
+    // 第一个永远是默认 profile（name 为空串），即使 profiles 目录不存在也保留
+    let mut result = vec![String::new()];
+
+    let profiles_dir = config_dir.join("profiles");
+
+    // 扫描 profiles/*/ 子目录；目录不存在等错误静默处理
+    let entries = match std::fs::read_dir(&profiles_dir) {
+        Ok(e) => e,
+        Err(_) => return result,
+    };
+
+    let mut named: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            // 跳过隐藏目录（如 .DS_Store 产物）
+            if !name.is_empty() && !name.starts_with('.') {
+                named.push(name.to_string());
+            }
+        }
+    }
+
+    named.sort();
+    result.extend(named);
+    result
+}
+
 fn get_opencode_data_dir() -> PathBuf {
     // 尊重 XDG_DATA_HOME（按 XDG 规范，空字符串视为未设置）
     if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {

@@ -10,6 +10,7 @@ import {
   type DiscoverableSkill,
   type ImportSkillSelection,
   type InstalledSkill,
+  type OpenCodeProfile,
   type SkillUpdateInfo,
   type SkillsShSearchResult,
 } from "@/lib/api/skills";
@@ -182,6 +183,40 @@ export function useToggleSkillApp() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["skills", "installed"] });
     },
+  });
+}
+
+/**
+ * 设置 Skill 的 OpenCode profile 分发目标
+ * 成功后刷新 installed 列表（opencodeProfiles / apps.opencode 已变更）
+ */
+export function useSetOpencodeProfiles() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      profiles,
+    }: {
+      id: string;
+      profiles: string[];
+    }) => skillsApi.setOpencodeProfiles(id, profiles),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["skills", "installed"] });
+    },
+  });
+}
+
+/**
+ * 列出所有可用的 OpenCode profile（含 default）
+ * staleTime: Infinity — profile 列表来自文件系统扫描，变更频率低，
+ * 首次进入使用缓存，手动刷新时才重新获取
+ */
+export function useOpencodeProfiles() {
+  return useQuery({
+    queryKey: ["opencode-profiles"],
+    queryFn: () => skillsApi.listOpencodeProfiles(),
+    staleTime: Infinity,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -361,5 +396,6 @@ export type {
   SkillBackupEntry,
   SkillUpdateInfo,
   SkillsShSearchResult,
+  OpenCodeProfile,
   AppId,
 };

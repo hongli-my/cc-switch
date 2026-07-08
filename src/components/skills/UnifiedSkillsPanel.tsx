@@ -24,7 +24,10 @@ import {
   useInstallSkillsFromZip,
   useCheckSkillUpdates,
   useUpdateSkill,
+  useOpencodeProfiles,
+  useSetOpencodeProfiles,
   type InstalledSkill,
+  type OpenCodeProfile,
   type SkillUpdateInfo,
 } from "@/hooks/useSkills";
 import type { AppId } from "@/lib/api/types";
@@ -103,6 +106,10 @@ const UnifiedSkillsPanel = React.forwardRef<
   const updateSkillMutation = useUpdateSkill();
   const [isUpdatingAll, setIsUpdatingAll] = useState(false);
 
+  // opencode profile 列表（顶层查一次，下传给每条 skill 行，避免每行各自发请求）
+  const { data: opencodeProfiles = [] } = useOpencodeProfiles();
+  const setOpencodeProfilesMutation = useSetOpencodeProfiles();
+
   const updatesMap = useMemo(() => {
     const map: Record<string, SkillUpdateInfo> = {};
     if (skillUpdates) {
@@ -137,6 +144,23 @@ const UnifiedSkillsPanel = React.forwardRef<
       await toggleAppMutation.mutateAsync({ id, app, enabled });
     } catch (error) {
       toast.error(t("common.error"), { description: String(error) });
+    }
+  };
+
+  // 设置某 skill 的 opencode profile 多选（"" = 整体/default）
+  const handleSetOpencodeProfiles = async (
+    id: string,
+    profiles: string[],
+  ) => {
+    try {
+      await setOpencodeProfilesMutation.mutateAsync({ id, profiles });
+    } catch (error) {
+      toast.error(
+        t("skills.opencode.updateFailed", {
+          defaultValue: "Failed to update OpenCode profiles",
+        }),
+        { description: String(error) },
+      );
     }
   };
 
@@ -433,6 +457,8 @@ const UnifiedSkillsPanel = React.forwardRef<
                   onUninstall={() => handleUninstall(skill)}
                   onUpdate={() => handleUpdateSkill(skill)}
                   isLast={index === skills.length - 1}
+                  opencodeAvailableProfiles={opencodeProfiles}
+                  onSetOpencodeProfiles={handleSetOpencodeProfiles}
                 />
               ))}
             </div>
@@ -486,6 +512,8 @@ interface InstalledSkillListItemProps {
   onUninstall: () => void;
   onUpdate?: () => void;
   isLast?: boolean;
+  opencodeAvailableProfiles: OpenCodeProfile[];
+  onSetOpencodeProfiles: (id: string, profiles: string[]) => void;
 }
 
 const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
@@ -496,6 +524,8 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
   onUninstall,
   onUpdate,
   isLast,
+  opencodeAvailableProfiles,
+  onSetOpencodeProfiles,
 }) => {
   const { t } = useTranslation();
 
@@ -557,6 +587,11 @@ const InstalledSkillListItem: React.FC<InstalledSkillListItemProps> = ({
         apps={skill.apps}
         onToggle={(app, enabled) => onToggleApp(skill.id, app, enabled)}
         appIds={SKILLS_APP_IDS}
+        opencodeProfiles={skill.opencodeProfiles ?? []}
+        onOpencodeProfilesChange={(profiles) =>
+          onSetOpencodeProfiles(skill.id, profiles)
+        }
+        opencodeAvailableProfiles={opencodeAvailableProfiles}
       />
 
       <div

@@ -198,6 +198,16 @@ pub struct InstalledSkill {
     /// 最近更新时间（Unix 时间戳，0 = 从未更新）
     #[serde(default)]
     pub updated_at: i64,
+    /// OpenCode profile 分发目标列表。
+    ///
+    /// - 空串 `""` = default/整体 profile（`~/.config/opencode/skills/`）
+    /// - 命名 profile = 对应 `~/.config/opencode/profiles/<name>/skills/`
+    ///
+    /// 空数组表示未分发到任何 opencode profile。当 `apps.opencode == true`
+    /// 但此数组为空时，DAO 读取层会自动兼容为 `[""]`（仅 default），以保持
+    /// 升级前的行为。
+    #[serde(default)]
+    pub opencode_profiles: Vec<String>,
 }
 
 /// 未管理的 Skill（在应用目录中发现但未被 CC Switch 管理）

@@ -1922,6 +1922,12 @@
     "updateAll": "全部更新 ({{count}})",
     "updatingAll": "更新中...",
     "updateAllSuccess": "已成功更新 {{count}} 個技能",
+    "opencode": {
+      "profilesHeader": "OpenCode Profile",
+      "overall": "整體",
+      "defaultTag": "default",
+      "updateFailed": "更新 OpenCode Profile 失敗"
+    },
     "error": {
       "skillNotFound": "技能不存在：{{directory}}",
       "missingRepoInfo": "缺少儲存庫資訊（owner 或 name）",

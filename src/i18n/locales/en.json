@@ -1950,6 +1950,12 @@
     "updateAll": "Update All ({{count}})",
     "updatingAll": "Updating...",
     "updateAllSuccess": "Successfully updated {{count}} skill(s)",
+    "opencode": {
+      "profilesHeader": "OpenCode Profiles",
+      "overall": "Overall",
+      "defaultTag": "default",
+      "updateFailed": "Failed to update OpenCode profiles"
+    },
     "error": {
       "skillNotFound": "Skill not found: {{directory}}",
       "missingRepoInfo": "Missing repository info (owner or name)",
