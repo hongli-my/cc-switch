@@ -137,6 +137,9 @@ impl McpService {
             AppType::Hermes => {
                 mcp::sync_single_server_to_hermes(&Default::default(), &server.id, &server.server)?;
             }
+            AppType::Pi => {
+                log::debug!("Pi MCP sync not yet implemented, skipping");
+            }
         }
         Ok(())
     }
@@ -171,6 +174,9 @@ impl McpService {
             }
             AppType::Hermes => {
                 mcp::remove_server_from_hermes(id)?;
+            }
+            AppType::Pi => {
+                log::debug!("Pi MCP remove not yet implemented, skipping");
             }
         }
         Ok(())

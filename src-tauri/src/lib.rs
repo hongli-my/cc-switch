@@ -21,6 +21,7 @@ mod linux_fix;
 mod mcp;
 mod openclaw_config;
 mod opencode_config;
+mod pi_config;
 mod panic_hook;
 mod prompt;
 mod prompt_files;

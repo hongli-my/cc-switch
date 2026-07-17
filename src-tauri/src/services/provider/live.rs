@@ -347,7 +347,7 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
             }
             _ => false,
         },
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => false,
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop | AppType::Pi => false,
     }
 }
 
@@ -417,7 +417,7 @@ pub(crate) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop | AppType::Pi => {
             Ok(settings.clone())
         }
     }
@@ -474,7 +474,7 @@ fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop | AppType::Pi => {
             Ok(settings.clone())
         }
     }
@@ -883,6 +883,11 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())?;
             log::debug!("Hermes provider '{}' written to live config", provider.id);
         }
+        AppType::Pi => {
+            // Pi uses additive mode, providers written to ~/.pi/agent/auth.json
+            // TODO: implement single provider write to pi auth.json
+            log::debug!("Pi provider '{}' live write not yet fully implemented", provider.id);
+        }
     }
     Ok(())
 }
@@ -1132,6 +1137,21 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             let config = crate::hermes_config::yaml_to_json(&yaml_config)?;
             Ok(config)
         }
+        AppType::Pi => {
+            let auth_path = crate::pi_config::get_pi_auth_path();
+            if !auth_path.exists() {
+                return Err(AppError::localized(
+                    "pi.config.missing",
+                    "Pi 配置文件不存在",
+                    "Pi configuration file not found",
+                ));
+            }
+            let content = std::fs::read_to_string(&auth_path)
+                .map_err(|e| AppError::Message(format!("读取 Pi 配置失败: {e}")))?;
+            let config: Value = serde_json::from_str(&content)
+                .map_err(|e| AppError::Message(format!("解析 Pi 配置失败: {e}")))?;
+            Ok(config)
+        }
     }
 }
 
@@ -1226,7 +1246,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             })
         }
         // OpenCode, OpenClaw and Hermes use additive mode and are handled by early return above
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
             unreachable!("additive mode apps are handled by early return")
         }
     };
