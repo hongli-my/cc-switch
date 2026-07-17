@@ -880,4 +880,20 @@ mod tests {
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
     }
+
+    #[test]
+    fn visible_apps_defaults_pi_to_true_when_missing() {
+        // 用户旧 settings.json 里 visibleApps 没有 pi 字段时，应默认可见
+        let visible: VisibleApps = serde_json::from_value(serde_json::json!({
+            "claude": true,
+            "codex": true,
+            "gemini": true,
+            "opencode": true,
+            "openclaw": true,
+            "hermes": true
+        }))
+        .expect("visible apps");
+
+        assert!(visible.is_visible(&AppType::Pi), "Pi should be visible by default when the field is missing");
+    }
 }
