@@ -44,6 +44,8 @@ pub(crate) fn provider_exists_in_live_config(
             .map(|providers| providers.contains_key(provider_id)),
         AppType::Hermes => crate::hermes_config::get_providers()
             .map(|providers| providers.contains_key(provider_id)),
+        AppType::Pi => crate::pi_config::get_providers()
+            .map(|providers| providers.contains_key(provider_id)),
         _ => Ok(false),
     }
 }
@@ -347,7 +349,7 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
             }
             _ => false,
         },
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => false,
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::ClaudeDesktop => false,
     }
 }
 
@@ -417,7 +419,7 @@ pub(crate) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::ClaudeDesktop => {
             Ok(settings.clone())
         }
     }
@@ -474,7 +476,7 @@ fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::ClaudeDesktop => {
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi | AppType::ClaudeDesktop => {
             Ok(settings.clone())
         }
     }
@@ -837,6 +839,27 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
                 }
             }
         }
+        AppType::Pi => {
+            // Pi uses additive mode - write provider to ~/.pi/agent/models.json
+            use crate::pi_config;
+
+            // Pi 的 settings_config 即为 providers 段中的一个 provider 片段
+            // （{ baseUrl, apiKey, api, models }）。直接写入即可。
+            let config_to_write = provider.settings_config.clone();
+
+            // 校验：至少应包含 baseUrl 或 apiKey 之一，避免写入空片段
+            if config_to_write.get("baseUrl").is_none()
+                && config_to_write.get("apiKey").is_none()
+            {
+                return Err(AppError::Message(format!(
+                    "Pi provider '{}' has invalid config structure for live config (must contain 'baseUrl' or 'apiKey')",
+                    provider.id
+                )));
+            }
+
+            pi_config::set_provider(&provider.id, config_to_write)?;
+            log::info!("Pi provider '{}' written to live config", provider.id);
+        }
         AppType::OpenClaw => {
             // OpenClaw uses additive mode - write provider to config
             use crate::openclaw_config;
@@ -1132,6 +1155,11 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             let config = crate::hermes_config::yaml_to_json(&yaml_config)?;
             Ok(config)
         }
+        AppType::Pi => {
+            // Pi 的 live 配置即 ~/.pi/agent/models.json
+            let config = crate::pi_config::read_pi_models()?;
+            Ok(config)
+        }
     }
 }
 
@@ -1225,8 +1253,8 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
                 "config": config_obj
             })
         }
-        // OpenCode, OpenClaw and Hermes use additive mode and are handled by early return above
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+        // OpenCode, OpenClaw, Hermes and Pi use additive mode and are handled by early return above
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes | AppType::Pi => {
             unreachable!("additive mode apps are handled by early return")
         }
     };
@@ -1442,6 +1470,66 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
 
         imported += 1;
         log::info!("Imported OpenCode provider '{id}' from live config");
+    }
+
+    Ok(imported)
+}
+
+/// Import all providers from Pi live config to database
+///
+/// This imports existing providers from ~/.pi/agent/models.json
+/// into the CC Switch database. Each provider found under the `providers`
+/// object will be added to the database with is_current set to false.
+pub fn import_pi_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    use crate::pi_config;
+
+    let providers = pi_config::get_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0;
+    let existing_ids = state.db.get_provider_ids("pi")?;
+
+    for (id, config) in providers {
+        // Skip if already exists in database
+        if existing_ids.contains(&id) {
+            log::debug!("Pi provider '{id}' already exists in database, skipping");
+            continue;
+        }
+
+        // Pi 的 provider 片段直接作为 settings_config
+        let settings_config = config;
+
+        // 推导显示名：优先 models[0].name / baseUrl，回退到 id
+        let name = settings_config
+            .get("models")
+            .and_then(|m| m.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                settings_config
+                    .get("baseUrl")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| id.clone());
+
+        let mut provider = Provider::with_id(id.clone(), name, settings_config, None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(e) = state.db.save_provider("pi", &provider) {
+            log::warn!("Failed to import Pi provider '{id}': {e}");
+            continue;
+        }
+
+        imported += 1;
+        log::info!("Imported Pi provider '{id}' from live config");
     }
 
     Ok(imported)

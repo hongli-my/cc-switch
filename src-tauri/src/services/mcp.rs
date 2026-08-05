@@ -43,6 +43,9 @@ impl McpService {
         if prev_apps.hermes && !server.apps.hermes {
             Self::remove_server_from_app(state, &server.id, &AppType::Hermes)?;
         }
+        if prev_apps.pi && !server.apps.pi {
+            Self::remove_server_from_app(state, &server.id, &AppType::Pi)?;
+        }
 
         // 同步到各个启用的应用
         Self::sync_server_to_apps(state, &server)?;
@@ -137,6 +140,13 @@ impl McpService {
             AppType::Hermes => {
                 mcp::sync_single_server_to_hermes(&Default::default(), &server.id, &server.server)?;
             }
+            AppType::Pi => {
+                mcp::sync_single_server_to_pi(
+                    &Default::default(),
+                    &server.id,
+                    &server.server,
+                )?;
+            }
         }
         Ok(())
     }
@@ -171,6 +181,9 @@ impl McpService {
             }
             AppType::Hermes => {
                 mcp::remove_server_from_hermes(id)?;
+            }
+            AppType::Pi => {
+                mcp::remove_server_from_pi(id)?;
             }
         }
         Ok(())
@@ -428,6 +441,36 @@ impl McpService {
 
                     // 导入是读取已有配置，不应反向写回任何应用的 live 配置。
                     // 显式编辑、启用/禁用或手动同步时再执行写回。
+                }
+            }
+        }
+
+        Ok(new_count)
+    }
+
+    /// 从 Pi 导入 MCP（Pi 目前没有独立的 MCP 配置段，导入为空）
+    pub fn import_from_pi(state: &AppState) -> Result<usize, AppError> {
+        // Pi 暂无独立的 MCP 配置文件段，这里复用统一导入逻辑（返回空）。
+        // 保留函数以保证启动期导入循环与其他 additive 应用对称。
+        let mut temp_config = crate::app_config::MultiAppConfig::default();
+        let count = crate::mcp::import_from_pi(&mut temp_config)?;
+
+        let mut new_count = 0;
+        if count > 0 {
+            if let Some(servers) = &temp_config.mcp.servers {
+                let mut existing = state.db.get_all_mcp_servers()?;
+                for server in servers.values() {
+                    let to_save = if let Some(existing_server) = existing.get(&server.id) {
+                        let mut merged = existing_server.clone();
+                        merged.apps.pi = true;
+                        merged
+                    } else {
+                        new_count += 1;
+                        server.clone()
+                    };
+
+                    state.db.save_mcp_server(&to_save)?;
+                    existing.insert(to_save.id.clone(), to_save.clone());
                 }
             }
         }

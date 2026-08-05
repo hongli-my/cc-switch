@@ -53,6 +53,7 @@ import {
 import { OpenCodeFormFields } from "./OpenCodeFormFields";
 import { OpenClawFormFields } from "./OpenClawFormFields";
 import { HermesFormFields } from "./HermesFormFields";
+import { PiProviderForm } from "./PiProviderForm";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
 import {
   applyTemplateValues,
@@ -259,6 +260,20 @@ export interface ProviderFormProps {
 export function ProviderForm(props: ProviderFormProps) {
   if (props.appId === "claude-desktop") {
     return <ClaudeDesktopProviderForm {...props} />;
+  }
+
+  // Pi 使用独立的自包含表单（PiProviderForm 是一个 Dialog，内部自行调用
+  // add_provider / update_provider，不走 ProviderFormFull 的统一提交流程）。
+  if (props.appId === "pi") {
+    return (
+      <PiProviderForm
+        open={true}
+        onOpenChange={(open) => {
+          if (!open) props.onCancel();
+        }}
+        editData={props.initialData}
+      />
+    );
   }
 
   return <ProviderFormFull {...props} />;

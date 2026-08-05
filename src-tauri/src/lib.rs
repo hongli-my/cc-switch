@@ -22,6 +22,7 @@ mod mcp;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+mod pi_config;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -686,6 +687,13 @@ pub fn run() {
                 Ok(_) => log::debug!("○ No new Hermes providers to import"),
                 Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
             }
+            match crate::services::provider::import_pi_providers_from_live(&app_state) {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Imported {count} Pi provider(s) from live config");
+                }
+                Ok(_) => log::debug!("○ No new Pi providers to import"),
+                Err(e) => log::warn!("✗ Failed to import Pi providers: {e}"),
+            }
 
             // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
             {
@@ -781,6 +789,14 @@ pub fn run() {
                     Ok(_) => log::debug!("○ No Hermes MCP servers found to import"),
                     Err(e) => log::warn!("✗ Failed to import Hermes MCP: {e}"),
                 }
+
+                match crate::services::mcp::McpService::import_from_pi(&app_state) {
+                    Ok(count) if count > 0 => {
+                        log::info!("✓ Imported {count} MCP server(s) from Pi");
+                    }
+                    Ok(_) => log::debug!("○ No Pi MCP servers found to import"),
+                    Err(e) => log::warn!("✗ Failed to import Pi MCP: {e}"),
+                }
             }
 
             // 4. 导入提示词文件（表空时触发）
@@ -794,6 +810,7 @@ pub fn run() {
                     crate::app_config::AppType::OpenCode,
                     crate::app_config::AppType::OpenClaw,
                     crate::app_config::AppType::Hermes,
+                    crate::app_config::AppType::Pi,
                 ] {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
@@ -1074,6 +1091,10 @@ pub fn run() {
                         "OpenCode usage initial sync",
                         crate::services::session_usage_opencode::sync_opencode_usage(db),
                     );
+                    run_step(
+                        "Pi usage initial sync",
+                        crate::services::session_usage_pi::sync_pi_usage(db),
+                    );
 
                     // 定期同步
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
@@ -1097,6 +1118,10 @@ pub fn run() {
                         run_step(
                             "OpenCode usage periodic sync",
                             crate::services::session_usage_opencode::sync_opencode_usage(db),
+                        );
+                        run_step(
+                            "Pi usage periodic sync",
+                            crate::services::session_usage_pi::sync_pi_usage(db),
                         );
                     }
                 });
@@ -1375,6 +1400,9 @@ pub fn run() {
             // OpenCode specific
             commands::import_opencode_providers_from_live,
             commands::get_opencode_live_provider_ids,
+            // Pi specific
+            commands::import_pi_providers_from_live,
+            commands::get_pi_live_provider_ids,
             // OpenClaw specific
             commands::import_openclaw_providers_from_live,
             commands::get_openclaw_live_provider_ids,
