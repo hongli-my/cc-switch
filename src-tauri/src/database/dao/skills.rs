@@ -36,7 +36,7 @@ impl Database {
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
                         readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode,
-                        enabled_hermes, installed_at, content_hash, updated_at, opencode_profiles
+                        enabled_hermes, enabled_pi, installed_at, content_hash, updated_at, opencode_profiles
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -44,7 +44,7 @@ impl Database {
         let skill_iter = stmt
             .query_map([], |row| {
                 let opencode_enabled: bool = row.get(11)?;
-                let opencode_profiles_raw: String = row.get::<_, String>(16).unwrap_or_else(|_| "[]".to_string());
+                let opencode_profiles_raw: String = row.get::<_, String>(17).unwrap_or_else(|_| "[]".to_string());
                 Ok(InstalledSkill {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -60,11 +60,11 @@ impl Database {
                         gemini: row.get(10)?,
                         opencode: opencode_enabled,
                         hermes: row.get(12)?,
-                        pi: false,
+                        pi: row.get::<_, bool>(13).unwrap_or(false),
                     },
-                    installed_at: row.get(13)?,
-                    content_hash: row.get(14)?,
-                    updated_at: row.get::<_, i64>(15).unwrap_or(0),
+                    installed_at: row.get(14)?,
+                    content_hash: row.get(15)?,
+                    updated_at: row.get::<_, i64>(16).unwrap_or(0),
                     opencode_profiles: Self::parse_opencode_profiles(&opencode_profiles_raw, opencode_enabled),
                 })
             })
@@ -85,14 +85,14 @@ impl Database {
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
                         readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode,
-                        enabled_hermes, installed_at, content_hash, updated_at, opencode_profiles
+                        enabled_hermes, enabled_pi, installed_at, content_hash, updated_at, opencode_profiles
                  FROM skills WHERE id = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let result = stmt.query_row([id], |row| {
             let opencode_enabled: bool = row.get(11)?;
-            let opencode_profiles_raw: String = row.get::<_, String>(16).unwrap_or_else(|_| "[]".to_string());
+            let opencode_profiles_raw: String = row.get::<_, String>(17).unwrap_or_else(|_| "[]".to_string());
             Ok(InstalledSkill {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -108,11 +108,11 @@ impl Database {
                     gemini: row.get(10)?,
                     opencode: opencode_enabled,
                     hermes: row.get(12)?,
-                    pi: false,
+                    pi: row.get::<_, bool>(13).unwrap_or(false),
                 },
-                installed_at: row.get(13)?,
-                content_hash: row.get(14)?,
-                updated_at: row.get::<_, i64>(15).unwrap_or(0),
+                installed_at: row.get(14)?,
+                content_hash: row.get(15)?,
+                updated_at: row.get::<_, i64>(16).unwrap_or(0),
                 opencode_profiles: Self::parse_opencode_profiles(&opencode_profiles_raw, opencode_enabled),
             })
         });
@@ -133,8 +133,8 @@ impl Database {
             "INSERT OR REPLACE INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
               readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
-              installed_at, content_hash, updated_at, opencode_profiles)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              enabled_pi, installed_at, content_hash, updated_at, opencode_profiles)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 skill.id,
                 skill.name,
@@ -149,6 +149,7 @@ impl Database {
                 skill.apps.gemini,
                 skill.apps.opencode,
                 skill.apps.hermes,
+                skill.apps.pi,
                 skill.installed_at,
                 skill.content_hash,
                 skill.updated_at,
@@ -181,8 +182,8 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let affected = conn
             .execute(
-                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5 WHERE id = ?6",
-                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, id],
+                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5, enabled_pi = ?6 WHERE id = ?7",
+                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, apps.pi, id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)

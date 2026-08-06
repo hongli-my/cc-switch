@@ -2041,6 +2041,9 @@ impl ProviderService {
             AppType::Hermes => {
                 remove_hermes_provider_from_live(id)?;
             }
+            AppType::Pi => {
+                crate::pi_config::remove_provider(id)?;
+            }
             _ => {
                 return Err(AppError::Message(format!(
                     "App {} does not support remove from live config",
